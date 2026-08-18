@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: x402-echo-service
+    runtime: node
+    plan: free
+    buildCommand: ""
+    startCommand: node server.js
+    envVars:
+      - key: X402_PAYTO
+        value: "0x9Cc774A8eD49d89cBA1A288F4a050B8F7FbA77EE"

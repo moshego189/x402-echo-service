@@ -1,0 +1,4 @@
+{ "name": "x402-echo-service", "version": "1.0.0", "private": true,
+  "description": "Honest x402 echo service for protocol research",
+  "main": "server.js", "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=20" } }
