@@ -1,0 +1,13 @@
+# Credentials — never commit
+cdp_api_key.json
+*api_key*.json
+.env
+.env.*
+*.pem
+*.key
+# Captured x402 payloads are bearer instruments
+lab-log.jsonl
+*.jsonl
+# Local
+node_modules/
+.DS_Store
