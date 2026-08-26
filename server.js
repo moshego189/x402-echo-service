@@ -335,6 +335,16 @@ http.createServer((req,res)=>{
       try { v = await facilitator('verify', payload, reqs); logExt('verify', v._ext); }
       catch(e){
         console.error('[verify] failed', e.status||'', JSON.stringify(e.body||e.message));
+        // Skeleton only - no signature, no key material. Needed because the
+        // facilitator's schema error does not say which field was wrong.
+        try { console.error('[verify] payload skeleton', JSON.stringify({
+          top: Object.keys(payload),
+          x402Version: payload.x402Version, x402VersionType: typeof payload.x402Version,
+          accepted: payload.accepted ? Object.keys(payload.accepted) : null,
+          acceptedScheme: payload.accepted?.scheme, acceptedNetwork: payload.accepted?.network,
+          payloadKeys: payload.payload ? Object.keys(payload.payload) : null,
+          extensions: payload.extensions ? Object.keys(payload.extensions) : null,
+          resourceKeys: payload.resource ? Object.keys(payload.resource) : null })); } catch(_){}
         return J(502,{ error:'could not verify payment; you were not charged' }); }
       if(!v.isValid){
         const b=paymentRequiredBody(PUBLIC);
