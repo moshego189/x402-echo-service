@@ -147,6 +147,21 @@ function badInput(b){
   return null;
 }
 
+const SERVICE_NAME = 'x402 research echo';
+
+// Discovery metadata. The Bazaar ranks on how completely a resource describes
+// itself, not on transaction volume, so these are load-bearing - but every one
+// of them is an accurate description of what the route actually does.
+const CATEGORY = 'Infra';
+const SUMMARY  = 'Paid echo endpoint for x402 conformance testing. POST a message, '
+  + 'get it back with its SHA-256 digest, a server timestamp, and the settlement '
+  + 'transaction hash. $0.001 USDC on Base per call.';
+const TAGS = ['x402','echo','agents','pay-per-call','micro-usdc',
+  'protocol-conformance','security-research','sha256','developer-tools','base'];
+
+// 256x256 PNG, served from /icon.png on this same origin.
+const ICON = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAACUUlEQVR42u3TMQ0AIAwAwUpgRgD+ZTEwIKEbM2MJl5yCTz5aH/CtkAADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAABhABQwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABoDyA8y14TAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABgADgAEwgAEwgAEwgAEwgAEwgAEwgAEwgAEwgAEwgAEwgAEwgAEwwKsDQAUGwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAABlABA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4AB4FoCea769kb5NpoAAAAASUVORK5CYII=','base64');
+
 const INPUT_SCHEMA = { type:'object', required:['message'], additionalProperties:false,
   properties:{ message:{ type:'string', minLength:1, maxLength:4096, description:'Text to echo back.' } } };
 const OUTPUT_SCHEMA = { type:'object', required:['echo','sha256','timestamp'],
@@ -164,9 +179,12 @@ function paymentOption(PUBLIC) { return {
 
 function paymentRequiredBody(PUBLIC) {
   return { x402Version:2, error:'Payment required: $0.001 USDC', reason_code:'payment_required',
-    resource:{ url:`${PUBLIC}${ROUTE}`, description:GUIDANCE, mimeType:'application/json', serviceName:'x402 research echo' },
+    resource:{ url:`${PUBLIC}${ROUTE}`, description:GUIDANCE, mimeType:'application/json',
+      serviceName:SERVICE_NAME, tags:TAGS, iconUrl:`${PUBLIC}/icon.png` },
     accepts:[paymentOption(PUBLIC)],
     extensions:{ bazaar:{
+      serviceName:SERVICE_NAME, category:CATEGORY, summary:SUMMARY, tags:TAGS,
+      coverImage:`${PUBLIC}/icon.png`,
       info:{ input:{ type:'http', method:'POST', bodyType:'json', body:{ message:'hello world' } },
              output:{ type:'json', example:{ echo:'hello world',
                sha256:'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9',
@@ -227,6 +245,8 @@ http.createServer((req,res)=>{
     res.end(JSON.stringify(obj,null,2)); };
 
   if (p==='/openapi.json' || p==='/.well-known/openapi.json') return J(200, OPENAPI(PUBLIC));
+  if (p==='/icon.png'){ res.writeHead(200,{'content-type':'image/png',
+    'cache-control':'public, max-age=86400'}); return res.end(ICON); }
   if (p==='/favicon.ico'){ res.writeHead(200,{'content-type':'image/x-icon'}); return res.end(FAVICON); }
   if (p==='/') return J(200,{ service:'x402 research echo', paid_route:`POST ${ROUTE}`,
       openapi:`${PUBLIC}/openapi.json`, guidance:GUIDANCE });
@@ -313,7 +333,9 @@ http.createServer((req,res)=>{
         console.warn('[verify] payload carries no extensions.bazaar - this will index nothing');
       let v;
       try { v = await facilitator('verify', payload, reqs); logExt('verify', v._ext); }
-      catch(e){ return J(502,{ error:'could not verify payment; you were not charged' }); }
+      catch(e){
+        console.error('[verify] failed', e.status||'', JSON.stringify(e.body||e.message));
+        return J(502,{ error:'could not verify payment; you were not charged' }); }
       if(!v.isValid){
         const b=paymentRequiredBody(PUBLIC);
         b.error=`payment authorization is not valid: ${v.invalidReason||'unspecified'}`;
@@ -332,6 +354,7 @@ http.createServer((req,res)=>{
       let st;
       try { st = await facilitator('settle', payload, reqs); logExt('settle', st._ext); }
       catch(e){
+        console.error('[settle] failed', e.status||'', JSON.stringify(e.body||e.message));
         // The outcome is genuinely unknown: it may have settled before the
         // connection failed. Record that BEFORE returning, so a retry cannot
         // re-enter /settle on a nonce that may already have moved money.
