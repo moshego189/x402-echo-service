@@ -38,20 +38,28 @@ const ROUTE  = '/echo';
 
 const SETTLE = process.env.X402_SETTLE === '1';
 
-const GUIDANCE = SETTLE ?
+// The CDP facilitator rejects a payment payload containing any string longer
+// than 500 characters, and conformant clients echo this description into the
+// payload they sign. A description over the cap therefore makes the route
+// unpayable, with only a schema error naming no field. Keep it well under.
+const DESC_CAP = 500;
+function capped(t){
+  if (t.length <= DESC_CAP) return t;
+  console.warn(`[config] description is ${t.length} chars, over the ${DESC_CAP} cap - truncating`);
+  return t.slice(0, DESC_CAP - 1) + '\u2026';
+}
+
+const GUIDANCE = capped(SETTLE ?
  ('Echo service for x402 protocol research. POST a JSON body with a "message" string; ' +
-  'the response returns the message, its SHA-256 digest, and a server timestamp. ' +
-  'Payment is live: $0.001 USDC on Base is verified and then settled through the Coinbase ' +
-  'CDP facilitator, so callers ARE charged. The response body is computed before ' +
-  'settlement is requested, and the settlement transaction hash is returned both in the ' +
-  'response body and in the PAYMENT-RESPONSE header. Operated for security research into ' +
-  'the x402 discovery layer.')
+  'the response returns the message, its SHA-256 digest and a server timestamp. ' +
+  'Payment is live: $0.001 USDC on Base is verified and settled via the Coinbase CDP ' +
+  'facilitator, so callers ARE charged. The response is computed before settlement, and ' +
+  'the settlement tx hash is returned in the body and in PAYMENT-RESPONSE.')
  :
  ('Echo service for x402 protocol research. POST a JSON body with a "message" string; ' +
-  'the response returns the message, its SHA-256 digest, and a server timestamp. ' +
+  'the response returns the message, its SHA-256 digest and a server timestamp. ' +
   'Payment is advertised and cryptographically verified but never settled: the ' +
-  'authorization is discarded after verification, so callers are not charged. ' +
-  'Operated for security research into the x402 discovery layer.');
+  'authorization is discarded after verification, so callers are not charged.'));
 
 // ---------------------------------------------------------------------------
 // CDP facilitator client. Stdlib only - no npm dependency, so the Dockerfile
