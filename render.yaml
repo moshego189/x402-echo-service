@@ -8,3 +8,12 @@ services:
     envVars:
       - key: X402_PAYTO
         value: "0x9Cc774A8eD49d89cBA1A288F4a050B8F7FbA77EE"
+      # Set in the Render dashboard, not here. `sync: false` declares the
+      # variable to the Blueprint so it is not stripped on deploy, while
+      # keeping the value out of git.
+      - key: CDP_API_KEY_ID
+        sync: false
+      - key: CDP_API_KEY_SECRET
+        sync: false
+      - key: X402_SETTLE
+        value: "1"
