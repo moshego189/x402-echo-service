@@ -111,6 +111,32 @@ function facilitator(op, paymentPayload, paymentRequirements){
   });
 }
 
+// Idempotency by EIP-3009 nonce. Nonces are single-use, which makes this a
+// sound key. Bounds: 10k entries, FIFO eviction, 24h TTL. In-memory only - the
+// free plan spins down, so we never promise durable recovery.
+const RECEIPTS = new Map();
+const RECEIPT_TTL = 24*3600*1000, RECEIPT_MAX = 10000;
+function receiptGet(nonce){
+  const r = RECEIPTS.get(nonce);
+  if(!r) return null;
+  if(Date.now()-r.at > RECEIPT_TTL){ RECEIPTS.delete(nonce); return null; }
+  return r;
+}
+function receiptPut(nonce, rec){
+  if(!nonce) return;
+  if(RECEIPTS.size >= RECEIPT_MAX) RECEIPTS.delete(RECEIPTS.keys().next().value);
+  RECEIPTS.set(nonce, { ...rec, at:Date.now() });
+}
+
+// The facilitator reports bazaar indexing here, on verify as well as settle.
+// It is the only signal we get, so it is always logged.
+function logExt(op, ext){
+  if(!ext){ console.log(`[${op}] no EXTENSION-RESPONSES header`); return; }
+  try { console.log(`[${op}] EXTENSION-RESPONSES`,
+    JSON.stringify(JSON.parse(Buffer.from(ext,'base64').toString('utf8')))); }
+  catch(e){ console.log(`[${op}] EXTENSION-RESPONSES (undecodable)`); }
+}
+
 // Enforce the declared input schema instead of only advertising it.
 function badInput(b){
   if (b===null || typeof b!=='object' || Array.isArray(b)) return 'body must be a JSON object';
@@ -254,13 +280,34 @@ http.createServer((req,res)=>{
 
       const reqs = paymentOption(PUBLIC);
       const nonce = payload?.payload?.authorization?.nonce ?? null;
+      const msgHash = crypto.createHash('sha256').update(msg).digest('hex');
+
+      // Replay handling comes BEFORE verify, so an authorization already spent
+      // is never sent to the facilitator a second time.
+      const prior = receiptGet(nonce);
+      if(prior){
+        if(prior.status==='unknown')
+          return J(409,{ error:'a previous request for this authorization had an unknown '+
+            'settlement outcome; refusing to attempt a second settlement. Check the '+
+            'transaction on-chain by nonce.', authorization_nonce:nonce });
+        if(prior.status==='settled'){
+          if(prior.msgHash!==msgHash)
+            return J(402,{ error:'this authorization was already consumed for a different '+
+              'request body', authorization_nonce:nonce });
+          return J(200,{ ...prior.out, settlement:prior.settlement,
+            note:'this authorization was already settled by an earlier request; returning the '+
+                 'original result and receipt. You were not charged again.' });
+        }
+      }
 
       if(!CDP_ID || !CDP_SECRET)
         return J(503,{ error:'facilitator not configured; no payment was processed' });
 
       // 1. Verify. Free, moves no money.
+      if(!payload.extensions || !payload.extensions.bazaar)
+        console.warn('[verify] payload carries no extensions.bazaar - this will index nothing');
       let v;
-      try { v = await facilitator('verify', payload, reqs); }
+      try { v = await facilitator('verify', payload, reqs); logExt('verify', v._ext); }
       catch(e){ return J(502,{ error:'could not verify payment; you were not charged' }); }
       if(!v.isValid){
         const b=paymentRequiredBody(PUBLIC);
@@ -270,8 +317,7 @@ http.createServer((req,res)=>{
 
       // 2. Compute the deliverable BEFORE requesting settlement, so settlement
       //    can never succeed for a response we were unable to produce.
-      const out = { echo:msg, sha256:crypto.createHash('sha256').update(msg).digest('hex'),
-                    timestamp:new Date().toISOString() };
+      const out = { echo:msg, sha256:msgHash, timestamp:new Date().toISOString() };
 
       if(!SETTLE)
         return J(200,{ ...out,
@@ -279,19 +325,39 @@ http.createServer((req,res)=>{
 
       // 3. Settle.
       let st;
-      try { st = await facilitator('settle', payload, reqs); }
+      try { st = await facilitator('settle', payload, reqs); logExt('settle', st._ext); }
       catch(e){
-        // The outcome is genuinely unknown: the request may have settled before
-        // the connection failed. Do NOT claim the caller was not charged.
+        // The outcome is genuinely unknown: it may have settled before the
+        // connection failed. Record that BEFORE returning, so a retry cannot
+        // re-enter /settle on a nonce that may already have moved money.
+        receiptPut(nonce,{ status:'unknown', msgHash });
         return J(502,{ error:'settlement outcome unknown - the facilitator did not respond. '+
           'If it settled, the payment is recoverable on-chain by authorization nonce.',
           authorization_nonce:nonce });
       }
-      if(!st.success)
-        return J(502,{ error:`settlement failed: ${st.errorReason||'unspecified'}; you were not charged` });
+      if(!st.success){
+        // NEVER say "you were not charged" here. A replayed authorization fails
+        // precisely because it already settled once - on that path the caller
+        // WAS charged, by the earlier request.
+        receiptPut(nonce,{ status:'failed', msgHash });
+        return J(502,{ error:`settlement failed: ${st.errorReason||'unspecified'}; `+
+          'this request made no charge', authorization_nonce:nonce });
+      }
 
-      return J(200,{ ...out, settlement:{ transaction:st.transaction, network:st.network,
-          amount:st.amount ?? AMOUNT, payer:st.payer ?? null } },
+      const settlement = { transaction:st.transaction, network:st.network,
+        amount:st.amount ?? AMOUNT, payer:st.payer ?? null,
+        recovery:'receipt held in memory only; recovery window ends at process restart' };
+
+      // Receipt is durable-as-we-can-make-it BEFORE delivery is attempted, so
+      // there is no path where money moved and no receipt exists.
+      receiptPut(nonce,{ status:'settled', msgHash, out, settlement });
+
+      res.on('error',()=>console.error('DELIVERY_FAILED',
+        JSON.stringify({ nonce, transaction:st.transaction, payer:st.payer ?? null })));
+      res.on('close',()=>{ if(!res.writableFinished) console.error('DELIVERY_FAILED',
+        JSON.stringify({ nonce, transaction:st.transaction, payer:st.payer ?? null })); });
+
+      return J(200,{ ...out, settlement },
         { 'payment-response':Buffer.from(JSON.stringify({
             success:true, transaction:st.transaction, network:st.network,
             payer:st.payer ?? null })).toString('base64') });
