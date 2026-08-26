@@ -156,8 +156,12 @@ const CATEGORY = 'Infra';
 const SUMMARY  = 'Paid echo endpoint for x402 conformance testing. POST a message, '
   + 'get it back with its SHA-256 digest, a server timestamp, and the settlement '
   + 'transaction hash. $0.001 USDC on Base per call.';
-const TAGS = ['x402','echo','agents','pay-per-call','micro-usdc',
-  'protocol-conformance','security-research','sha256','developer-tools','base'];
+// Only the FIRST FIVE survive: the indexer caps the top-level tags array at 5
+// (observed on every record in the catalog), so order is significant. The lead
+// five are the ones that actually distinguish this route; the generic payment
+// tags come after, where being dropped costs nothing.
+const TAGS = ['x402','echo','protocol-conformance','security-research','agents',
+  'pay-per-call','micro-usdc','sha256','developer-tools','base'];
 
 // 256x256 PNG, served from /icon.png on this same origin.
 const ICON = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAIAAADTED8xAAACUUlEQVR42u3TMQ0AIAwAwUpgRgD+ZTEwIKEbM2MJl5yCTz5aH/CtkAADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAABhABQwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABgADgAHAAGAAMAAYAAwABoDyA8y14TAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABjAABgADgAEwgAEwgAEwgAEwgAEwgAEwgAEwgAEwgAEwgAEwgAEwgAEwwKsDQAUGwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAABlABA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4ABwABgADAAGAAMAAYAA4AB4FoCea769kb5NpoAAAAASUVORK5CYII=','base64');
