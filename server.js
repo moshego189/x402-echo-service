@@ -239,14 +239,10 @@ http.createServer((req,res)=>{
     let raw=''; req.on('data',c=>{ raw+=c; if(raw.length>1e6) req.destroy(); });
 
     return req.on('end', async ()=>{
-      // Validate the request before touching payment, so a malformed body is
-      // never a reason to have charged someone.
-      let body; try{ body = JSON.parse(raw||'{}'); }
-      catch(e){ return J(400,{ error:'body must be valid JSON' }); }
-      const bad = badInput(body);
-      if (bad) return J(400,{ error:bad });
-      const msg = body.message;
-
+      // The 402 challenge must come FIRST and must not depend on the body.
+      // Coinbase's discovery validator probes this route with a non-conforming
+      // body to find the challenge; answering 400 there fails the returns_402
+      // preflight check and the resource is never indexed.
       if(!hdr){
         const b=paymentRequiredBody(PUBLIC);
         const challenge = [
@@ -265,6 +261,15 @@ http.createServer((req,res)=>{
           'www-authenticate':challenge,
           'payment-required':Buffer.from(JSON.stringify(b)).toString('base64') });
       }
+
+      // A payment header is present. Validate the body now - before any
+      // facilitator call - so a malformed request is never a reason to have
+      // charged someone.
+      let body; try{ body = JSON.parse(raw||'{}'); }
+      catch(e){ return J(400,{ error:'body must be valid JSON' }); }
+      const bad = badInput(body);
+      if (bad) return J(400,{ error:bad });
+      const msg = body.message;
 
       // A present-but-unparseable header is not a payment. Previously any
       // non-empty value bought the paid response.
