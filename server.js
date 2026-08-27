@@ -85,8 +85,17 @@ function originOf(req) {
     .split(',')[0].trim();
   return `${proto}://${host}`;
 }
-// The middleware needs a stable origin at config time; requests still report theirs.
-const PUBLIC = FIXED_PUBLIC || `http://localhost:${PORT}`;
+// The middleware pins the advertised resource URL at config time, so this MUST be
+// the public origin. Render provides RENDER_EXTERNAL_URL; falling back to localhost
+// silently advertises an unreachable http:// resource, which the discovery
+// validator rejects outright ("resource must start with 'https://'") and which
+// gets the resource dropped from the catalog. Fail loudly instead of quietly.
+const RENDER_URL = (process.env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, '');
+const PUBLIC = FIXED_PUBLIC || RENDER_URL || `http://localhost:${PORT}`;
+if (!PUBLIC.startsWith('https://')) {
+  console.warn('[config] advertised origin is not https: ' + PUBLIC);
+  console.warn('[config] discovery will REJECT this resource. Set X402_PUBLIC_BASE.');
+}
 
 // Same bazaar declaration the stdlib build ships, including the fields the
 // Bazaar ranks on: serviceName, category, summary, tags, coverImage.
