@@ -309,10 +309,14 @@ app.use((req, res, next) => {
           // three - all standard v2 requirements fields. NOT `currency`: it is not
           // part of the v2 shape, and including it made the middleware reject the
           // payload the client echoed back.
+          // Derive from the decoded body, never from a hardcoded route: this
+          // middleware serves every paid route, and pinning ROUTE here made the
+          // /search challenge advertise /echo as its resource.
+          const top = decoded.resource || {};
           for (const a of decoded.accepts || []) {
-            if (!a.resource) a.resource = a.resource || `${PUBLIC}${ROUTE}`;
-            if (!a.description) a.description = GUIDANCE;
-            if (!a.mimeType) a.mimeType = 'application/json';
+            if (!a.resource && top.url) a.resource = top.url;
+            if (!a.description && top.description) a.description = top.description;
+            if (!a.mimeType) a.mimeType = top.mimeType || 'application/json';
           }
           res.setHeader('payment-required',
             Buffer.from(JSON.stringify(decoded)).toString('base64'));
