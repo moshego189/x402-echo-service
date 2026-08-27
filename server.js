@@ -15,6 +15,10 @@
  * createX402Server(), which provisions its own receiver wallet and would move
  * payments off the address this service is already indexed under.
  *
+ * Ordering: the middleware verifies, the handler delivers, settlement follows.
+ * A charge therefore cannot precede delivery. The receipt lands in the
+ * PAYMENT-RESPONSE header, not the response body.
+ *
  * The advertised description MUST stay under 500 characters: the facilitator
  * rejects any payment payload containing a longer string, and conformant
  * clients echo this field into the payload they sign.
@@ -49,12 +53,17 @@ function capped(t) {
   console.warn(`[config] description is ${t.length} chars, over the ${DESC_CAP} cap - truncating`);
   return t.slice(0, DESC_CAP - 1) + '…';
 }
+// Accuracy note: this build delivers the response and THEN settles, so the
+// handler cannot know the transaction hash and the body does not carry one.
+// The receipt is in the PAYMENT-RESPONSE header. Do not reinstate a claim that
+// the hash is in the body.
 const GUIDANCE = capped(
   'Echo service for x402 protocol research. POST a JSON body with a "message" string; '
   + 'the response returns the message, its SHA-256 digest and a server timestamp. '
-  + 'Payment is live: $0.001 USDC on Base is verified and settled via the Coinbase CDP '
-  + 'facilitator, so callers ARE charged. The response is computed before settlement, and '
-  + 'the settlement tx hash is returned in the body and in PAYMENT-RESPONSE.');
+  + 'Payment is live: $0.001 USDC on Base. The authorization is verified, the response is '
+  + 'delivered, and settlement is requested afterwards via the Coinbase CDP facilitator, so '
+  + 'callers ARE charged and no charge can precede delivery. The settlement receipt is '
+  + 'returned in the PAYMENT-RESPONSE header.');
 
 const INPUT_SCHEMA = { type: 'object', required: ['message'], additionalProperties: false,
   properties: { message: { type: 'string', minLength: 1, maxLength: 4096,

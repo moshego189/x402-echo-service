@@ -65,5 +65,10 @@ Four SDK defaults are deliberately overridden, because each one breaks discovery
    fails its `returns_402` check and the resource is never indexed. Body parsing therefore
    runs *after* payment.
 
+The response body carries the echo, digest and timestamp only. Settlement happens *after*
+delivery, so the handler cannot know the transaction hash - the receipt is in the
+`PAYMENT-RESPONSE` header. This ordering is stronger than the previous build's: a charge
+cannot precede delivery.
+
 `X402_SETTLE` is vestigial in this build: the SDK middleware always settles, and the
 advertised guidance is written accordingly.
