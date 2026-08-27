@@ -236,6 +236,21 @@ app.use((req, res, next) => {
       if (hdr) {
         try {
           const decoded = JSON.parse(Buffer.from(String(hdr), 'base64').toString('utf8'));
+
+          // The SDK emits a lean accepts entry. awal 2.12.1 fails with
+          // "Invalid payment required response" unless each option also carries
+          // resource, currency, description and mimeType - the stdlib build sent
+          // them and was payable. Backfill without overwriting anything the SDK set.
+          for (const a of decoded.accepts || []) {
+            if (!a.resource) a.resource = `${PUBLIC}${ROUTE}`;
+            if (!a.currency && a.asset) a.currency = a.asset;
+            if (!a.description) a.description = GUIDANCE;
+            if (!a.mimeType) a.mimeType = 'application/json';
+          }
+          // Re-encode so the header can never disagree with the body.
+          res.setHeader('payment-required',
+            Buffer.from(JSON.stringify(decoded)).toString('base64'));
+
           const opt = (decoded.accepts || [])[0] || {};
           res.setHeader('x-402-version', '2');
           res.setHeader('access-control-expose-headers',
