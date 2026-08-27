@@ -302,6 +302,21 @@ app.use((req, res, next) => {
       if (hdr) {
         try {
           const decoded = JSON.parse(Buffer.from(String(hdr), 'base64').toString('utf8'));
+
+          // awal 2.12.1 rejects the SDK's lean accepts entry with "Invalid payment
+          // required response". The stdlib build this replaced also sent resource,
+          // description and mimeType and was payable, so backfill exactly those
+          // three - all standard v2 requirements fields. NOT `currency`: it is not
+          // part of the v2 shape, and including it made the middleware reject the
+          // payload the client echoed back.
+          for (const a of decoded.accepts || []) {
+            if (!a.resource) a.resource = a.resource || `${PUBLIC}${ROUTE}`;
+            if (!a.description) a.description = GUIDANCE;
+            if (!a.mimeType) a.mimeType = 'application/json';
+          }
+          res.setHeader('payment-required',
+            Buffer.from(JSON.stringify(decoded)).toString('base64'));
+
           const opt = (decoded.accepts || [])[0] || {};
           res.setHeader('x-402-version', '2');
           res.setHeader('access-control-expose-headers',
