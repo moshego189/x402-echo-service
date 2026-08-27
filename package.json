@@ -1,4 +1,23 @@
-{ "name": "x402-echo-service", "version": "1.0.0", "private": true,
-  "description": "Honest x402 echo service for protocol research",
-  "main": "server.js", "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=20" } }
+{
+  "name": "x402-echo-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "x402 echo service for protocol research (Coinbase SDK build)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "dependencies": {
+    "@coinbase/cdp-sdk": "^1.55.0",
+    "@x402/core": "^2.23.0",
+    "@x402/evm": "^2.23.0",
+    "@x402/express": "^2.23.0",
+    "@x402/extensions": "^2.23.0",
+    "@x402/svm": "^2.23.0",
+    "express": "^5.0.0"
+  }
+}

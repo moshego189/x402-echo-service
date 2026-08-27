@@ -3,7 +3,7 @@ services:
     name: x402-echo-service
     runtime: node
     plan: free
-    buildCommand: ""
+    buildCommand: "npm ci --omit=dev"
     startCommand: node server.js
     envVars:
       - key: X402_PAYTO

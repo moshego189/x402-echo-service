@@ -48,4 +48,22 @@ node server.js            # PORT defaults to 4404
 Config via env: `PORT`, `X402_PAYTO`, `X402_AMOUNT`, `X402_PUBLIC_BASE`, `X402_SETTLE`,
 `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`.
 
-No dependencies — Node standard library only.
+Built on the official packages: `@x402/express`, `@x402/core`, `@x402/evm` and
+`@coinbase/cdp-sdk/x402` (`createCdpFacilitatorClient` with an explicit `payTo`, rather than
+`createX402Server`, which provisions its own receiver wallet).
+
+Four SDK defaults are deliberately overridden, because each one breaks discovery:
+
+1. The middleware's 402 body defaults to `{}`, with the payment requirements only in the
+   `PAYMENT-REQUIRED` header. Discovery tooling and the Bazaar indexer read the **body**, so
+   the header is mirrored into it and the two cannot disagree.
+2. No `WWW-Authenticate` is sent; it is re-added.
+3. `resource.url` is derived per-request, which advertises the internal host when behind a
+   proxy. The route pins `resource` explicitly.
+4. `express.json()` answers a malformed body with 400 before the payment middleware can
+   answer 402. Coinbase's discovery validator probes with exactly such a body, so a 400 there
+   fails its `returns_402` check and the resource is never indexed. Body parsing therefore
+   runs *after* payment.
+
+`X402_SETTLE` is vestigial in this build: the SDK middleware always settles, and the
+advertised guidance is written accordingly.
