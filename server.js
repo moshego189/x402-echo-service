@@ -25,6 +25,7 @@
  */
 import express from 'express';
 import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { paymentMiddleware } from '@x402/express';
 import { x402ResourceServer } from '@x402/core/server';
 import { ExactEvmScheme } from '@x402/evm/exact/server';
@@ -96,6 +97,10 @@ const GUIDANCE = PROBE ? PROBE_GUIDANCE : GUIDANCE_SETTLING;
 // never echoed. Only non-spendable metadata is recorded - a nonce alone cannot
 // move funds. Bounded ring buffer, nothing written to disk.
 // ---------------------------------------------------------------------------
+// The SDK does not populate reqs.resource, so the facilitator cannot tell which
+// route it is settling. Carry the path in per-request context instead.
+const REQCTX = new AsyncLocalStorage();
+
 const ATTEMPTS = [];
 const ATTEMPTS_MAX = 5000;
 function recordAttempt(rec) {
@@ -139,6 +144,136 @@ function stats() {
 // authorization from any party can be converted into money. The measurement
 // happens at verify time, before settlement, so declining costs us nothing.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Utility routes. Each is a genuine, working, zero-dependency service and each
+// indexes as its own resource, which multiplies discovery surface honestly.
+// They settle normally: an agent pays $0.001 and receives the thing it paid
+// for. That is both the defensible posture and the empirically higher-traffic
+// one - declining settlement makes calls invisible to the catalog's counters,
+// which sinks the listing and starves it of the very traffic we are measuring.
+// ---------------------------------------------------------------------------
+const UTIL = [
+  { path:'/hash', name:'Hash Digest',
+    summary:'SHA-256, SHA-512 and keccak-256 digests of a string.',
+    tags:['hash','sha256','keccak','digest','utility'],
+    desc:'Compute cryptographic digests of a string. POST {"input":"...","algorithms":["sha256"]} '
+       + 'and receive one hex digest per requested algorithm. Supports sha256, sha512 and '
+       + 'keccak256. Deterministic, no storage, no upstream calls.',
+    input:{ type:'object', required:['input'], additionalProperties:false, properties:{
+      input:{type:'string',minLength:1,maxLength:65536},
+      algorithms:{type:'array',items:{enum:['sha256','sha512','keccak256']}} } },
+    output:{ type:'object', required:['input_bytes','digests'], properties:{
+      input_bytes:{type:'integer'}, digests:{type:'object'} } },
+    example:{ input:'hello world', algorithms:['sha256'] },
+    run(b){
+      const inp=String(b.input);
+      const algs=Array.isArray(b.algorithms)&&b.algorithms.length?b.algorithms:['sha256'];
+      const digests={};
+      for(const a of algs){
+        if(a==='keccak256'){ digests[a]=keccak256Hex(inp); continue; }
+        digests[a]=crypto.createHash(a==='sha512'?'sha512':'sha256').update(inp).digest('hex');
+      }
+      return { input_bytes:Buffer.byteLength(inp), digests };
+    } },
+
+  { path:'/uuid', name:'UUID Generator',
+    summary:'Cryptographically random UUIDv4 identifiers, 1 to 100 per call.',
+    tags:['uuid','identifier','random','generator','utility'],
+    desc:'Generate cryptographically random UUIDv4 identifiers. POST {"count":10} and receive '
+       + 'that many unique v4 UUIDs, 1 to 100 per call. Uses the platform CSPRNG. No storage.',
+    input:{ type:'object', additionalProperties:false, properties:{
+      count:{type:'integer',minimum:1,maximum:100,default:1} } },
+    output:{ type:'object', required:['count','uuids'], properties:{
+      count:{type:'integer'}, uuids:{type:'array',items:{type:'string'}} } },
+    example:{ count:3 },
+    run(b){
+      const n=Math.min(100,Math.max(1,parseInt(b.count??1,10)||1));
+      return { count:n, uuids:Array.from({length:n},()=>crypto.randomUUID()) };
+    } },
+
+  { path:'/base64', name:'Base64 Codec',
+    summary:'Encode or decode base64 and base64url, with validation.',
+    tags:['base64','encode','decode','codec','utility'],
+    desc:'Encode or decode base64. POST {"mode":"encode","input":"..."} or {"mode":"decode",...}. '
+       + 'Supports standard and url-safe alphabets via {"urlsafe":true}. Decoding validates the '
+       + 'input and reports an error rather than returning silent garbage.',
+    input:{ type:'object', required:['mode','input'], additionalProperties:false, properties:{
+      mode:{enum:['encode','decode']}, input:{type:'string',maxLength:65536},
+      urlsafe:{type:'boolean'} } },
+    output:{ type:'object', required:['mode','output'], properties:{
+      mode:{type:'string'}, output:{type:'string'}, bytes:{type:'integer'} } },
+    example:{ mode:'encode', input:'hello world' },
+    run(b){
+      const u=!!b.urlsafe;
+      if(b.mode==='encode'){
+        let o=Buffer.from(String(b.input),'utf8').toString('base64');
+        if(u) o=o.replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+        return { mode:'encode', output:o, bytes:Buffer.byteLength(String(b.input)) };
+      }
+      let i=String(b.input);
+      if(u) i=i.replace(/-/g,'+').replace(/_/g,'/');
+      const buf=Buffer.from(i,'base64');
+      const round=buf.toString('base64').replace(/=+$/,'');
+      if(round!==i.replace(/=+$/,'')) { const e=new Error('input is not valid base64'); e.bad=true; throw e; }
+      return { mode:'decode', output:buf.toString('utf8'), bytes:buf.length };
+    } },
+
+  { path:'/time', name:'Time Formats',
+    summary:'Current UTC time as ISO-8601, unix seconds, unix millis and RFC-2822.',
+    tags:['time','timestamp','clock','iso8601','utility'],
+    desc:'Server time in several formats at once. POST {} and receive the current UTC instant as '
+       + 'ISO-8601, unix seconds, unix milliseconds and RFC-2822. Useful for agents that need an '
+       + 'authoritative clock they did not compute themselves.',
+    input:{ type:'object', additionalProperties:false, properties:{} },
+    output:{ type:'object', required:['iso8601','unix','unix_ms','rfc2822'], properties:{
+      iso8601:{type:'string'}, unix:{type:'integer'}, unix_ms:{type:'integer'},
+      rfc2822:{type:'string'} } },
+    example:{},
+    run(){
+      const d=new Date();
+      return { iso8601:d.toISOString(), unix:Math.floor(d.getTime()/1000),
+               unix_ms:d.getTime(), rfc2822:d.toUTCString() };
+    } },
+];
+
+// keccak-256, stdlib only, so /hash has no dependency.
+function keccak256Hex(str){
+  const RC=[1n,0x8082n,0x800000000000808an,0x8000000080008000n,0x808bn,0x80000001n,
+    0x8000000080008081n,0x8000000000008009n,0x8an,0x88n,0x80008009n,0x8000000an,
+    0x8000808bn,0x800000000000008bn,0x8000000000008089n,0x8000000000008003n,
+    0x8000000000008002n,0x8000000000000080n,0x800an,0x800000008000000an,
+    0x8000000080008081n,0x8000000000008080n,0x80000001n,0x8000000080008008n];
+  const R=[0,1,62,28,27,36,44,6,55,20,3,10,43,25,39,41,45,15,21,8,18,2,61,56,14];
+  const M=(1n<<64n)-1n;
+  const rotl=(x,n)=>((x<<BigInt(n))|(x>>BigInt(64-n)))&M;
+  const S=new Array(25).fill(0n);
+  const rate=136;
+  const msg=Buffer.from(str,'utf8');
+  const pad=rate-(msg.length%rate);
+  const buf=Buffer.concat([msg,Buffer.alloc(pad)]);
+  buf[msg.length]|=0x01; buf[buf.length-1]|=0x80;
+  for(let off=0;off<buf.length;off+=rate){
+    for(let i=0;i<rate/8;i++) S[i]^=buf.readBigUInt64LE(off+i*8);
+    for(let r=0;r<24;r++){
+      const C=[0n,0n,0n,0n,0n];
+      for(let x=0;x<5;x++) C[x]=S[x]^S[x+5]^S[x+10]^S[x+15]^S[x+20];
+      for(let x=0;x<5;x++){
+        const D=C[(x+4)%5]^rotl(C[(x+1)%5],1);
+        for(let y=0;y<25;y+=5) S[x+y]^=D;
+      }
+      const B=new Array(25).fill(0n);
+      for(let x=0;x<5;x++) for(let y=0;y<5;y++)
+        B[y+((2*x+3*y)%5)*5]=rotl(S[x+y*5],R[x+y*5]);
+      for(let x=0;x<5;x++) for(let y=0;y<5;y++)
+        S[x+y*5]=B[x+y*5]^((~B[((x+1)%5)+y*5])&B[((x+2)%5)+y*5]&M);
+      S[0]^=RC[r];
+    }
+  }
+  let out='';
+  for(let i=0;i<4;i++){ let v=S[i]; for(let b=0;b<8;b++){ out+=Number(v&0xffn).toString(16).padStart(2,'0'); v>>=8n; } }
+  return out;
+}
+
 const LIMIT_PREFIX = '/limit-test';
 const LIMIT_TIERS = ['100000','500000','1000000','2500000','5000000','10000000','100000000'];
 const isLimitRoute = p => typeof p === 'string' && p.startsWith(LIMIT_PREFIX + '/');
@@ -317,11 +452,20 @@ function badInput(b) {
 
 const app = express();
 app.disable('x-powered-by');
+app.use((req, _res, next) => REQCTX.run(
+  { path: req.path, ua: req.headers['user-agent'] }, next));
 app.set('trust proxy', true);
 
 // Free routes are registered BEFORE the payment middleware, so they stay free.
-app.get('/', (req, res) => res.json({ service: SERVICE_NAME, paid_route: `POST ${ROUTE}`,
-  openapi: `${originOf(req)}/openapi.json`, stats: `${originOf(req)}/stats`, guidance: GUIDANCE }));
+app.get('/', (req, res) => res.json({
+  service: SERVICE_NAME,
+  paid_routes: [`POST ${ROUTE}`, ...UTIL.map(u => `POST ${u.path}`)],
+  routes: Object.fromEntries(UTIL.map(u => [u.path, u.summary])),
+  price: `${PRICE} USDC per call on Base`,
+  openapi: `${originOf(req)}/openapi.json`,
+  stats: `${originOf(req)}/stats`,
+  guidance: GUIDANCE,
+}));
 app.get('/stats', (_req, res) => res.json(stats()));
 app.get(['/openapi.json', '/.well-known/openapi.json'], (req, res) => res.json(OPENAPI(originOf(req))));
 app.get('/icon.png', (_req, res) => {
@@ -370,11 +514,23 @@ app.use((req, res, next) => {
 
 // Reject wrong methods on the paid path before the middleware sees them, so the
 // 402 challenge and the OpenAPI document cannot disagree about the verb.
-app.all(SEARCH_ROUTE, (req, res, next) => {
-  if (req.method !== 'POST') return res.status(405).set('allow', 'POST')
-    .json({ error: 'method not allowed', allow: 'POST' });
-  next();
-});
+for (const u of UTIL) {
+  app.all(u.path, (req, res, next) => {
+    if (req.method !== 'POST') return res.status(405).set('allow', 'POST')
+      .json({ error: 'method not allowed', allow: 'POST' });
+    next();
+  });
+}
+
+// /search was a probe route that returned no results. It is already indexed, so
+// agents may still find it: answer honestly and for free rather than take payment
+// for an empty response. The catalog prunes it on its own.
+app.all(SEARCH_ROUTE, (_req, res) => res.status(410).json({
+  error: 'withdrawn',
+  detail: 'This route was a research probe and returned no search results. It has been '
+        + 'withdrawn rather than charged for. GET / lists the utility routes this '
+        + 'service actually provides.',
+}));
 
 app.all(ROUTE, (req, res, next) => {
   if (req.method !== 'POST') return res.status(405).set('allow', 'POST')
@@ -387,23 +543,34 @@ const cdpFacilitator = createCdpFacilitatorClient();    // reads CDP_API_KEY_ID 
 // In probe mode, delegate everything to the real client EXCEPT settle. verify()
 // still round-trips to CDP, so a recorded attempt means the authorization was
 // genuinely valid and spendable. settle() never leaves this process.
-const facilitator = !PROBE ? cdpFacilitator : new Proxy(cdpFacilitator, {
+const facilitator = new Proxy(cdpFacilitator, {
   get(target, prop, recv) {
     if (prop === 'verify') return async (payload, reqs) => {
       const v = await target.verify(payload, reqs);
       recordAttempt({
         at: new Date().toISOString(),
+        route: REQCTX.getStore()?.path ?? null,
         payer: v?.payer ?? payload?.payload?.authorization?.from ?? null,
         amount: reqs?.amount ?? AMOUNT,
         network: reqs?.network ?? NET,
         nonce: payload?.payload?.authorization?.nonce ?? null,
         verified: !!v?.isValid,
+        mode: PROBE ? 'probe' : 'settling',
+        ua: String(REQCTX.getStore()?.ua || '').slice(0, 90) || undefined,
         invalidReason: v?.isValid ? undefined : (v?.invalidReason ?? null),
       });
       return v;
     };
     if (prop === 'settle') return async (payload, reqs) => {
       const from = String(payload?.payload?.authorization?.from || '').toLowerCase();
+      if (!PROBE) {
+        const r = await target.settle(payload, reqs);
+        console.log('SETTLED', JSON.stringify({ at: new Date().toISOString(),
+          route: REQCTX.getStore()?.path ?? null, payer: from,
+          amount: reqs?.amount ?? AMOUNT, success: !!r?.success,
+          transaction: r?.transaction ?? null }));
+        return r;
+      }
       // Settle ONLY the one legitimate price. An earlier version keyed this on
       // reqs.resource, which the SDK does not populate, so the check silently
       // evaluated false and four escalation payments settled. Keying on the
@@ -430,6 +597,40 @@ const facilitator = !PROBE ? cdpFacilitator : new Proxy(cdpFacilitator, {
 const server = new x402ResourceServer(facilitator);
 server.register(NET, new ExactEvmScheme());
 
+function utilBazaar(u){
+  return {
+    serviceName: u.name,
+    category: 'Infra',
+    summary: u.summary,
+    tags: u.tags,
+    coverImage: `${PUBLIC}/icon.png`,
+    info: { input:{ type:'http', method:'POST', bodyType:'json', body:u.example },
+            output:{ type:'json', example:u.run(u.example) } },
+    schema: { $schema:'https://json-schema.org/draft/2020-12/schema',
+      type:'object', required:['input','output'],
+      properties:{
+        input:{ type:'object', required:['type','bodyType','body'],
+          properties:{ type:{const:'http'}, method:{enum:['POST']},
+            bodyType:{enum:['json']}, body:u.input } },
+        output:{ type:'object', required:['type','example'],
+          properties:{ type:{const:'json'}, example:u.output } } } },
+  };
+}
+
+const UTIL_ROUTES = Object.fromEntries(UTIL.map(u => [
+  `POST ${u.path}`, {
+    accepts: { scheme:'exact', price:PRICE, network:NET, payTo:PAYTO,
+               extra:{ name:'USD Coin', version:'2' } },
+    resource: `${PUBLIC}${u.path}`,
+    description: u.desc,
+    mimeType: 'application/json',
+    serviceName: u.name,
+    tags: u.tags,
+    iconUrl: `${PUBLIC}/icon.png`,
+    extensions: { bazaar: utilBazaar(u) },
+  },
+]));
+
 const LIMIT_ROUTES = Object.fromEntries(LIMIT_TIERS.map(amt => [
   `POST ${LIMIT_PREFIX}/${amt}`, {
     accepts: { scheme: 'exact', price: { amount: amt, asset: ASSET }, network: NET, payTo: PAYTO,
@@ -442,17 +643,7 @@ const LIMIT_ROUTES = Object.fromEntries(LIMIT_TIERS.map(amt => [
 ]));
 
 app.use(paymentMiddleware({
-  ...LIMIT_ROUTES,
-  [`POST ${SEARCH_ROUTE}`]: {
-    accepts: { scheme: 'exact', price: PRICE, network: NET, payTo: PAYTO },
-    resource: `${PUBLIC}${SEARCH_ROUTE}`,
-    description: SEARCH_DESC,
-    mimeType: 'application/json',
-    serviceName: SEARCH_NAME,
-    tags: SEARCH_TAGS,
-    iconUrl: `${PUBLIC}/icon.png`,
-    extensions: { bazaar: SEARCH_BAZAAR },
-  },
+  ...UTIL_ROUTES,
   [`POST ${ROUTE}`]: {
     accepts: { scheme: 'exact', price: PRICE, network: NET, payTo: PAYTO },
     resource: `${PUBLIC}${ROUTE}`,
@@ -479,18 +670,20 @@ app.post(`${LIMIT_PREFIX}/:amount`, express.json({ limit: '64kb' }), (req, res) 
         + 'so no funds moved and none can. The signature was not stored.' });
 });
 
-// Reached only once payment has been verified by the middleware.
-app.post(SEARCH_ROUTE, express.json({ limit: '1mb' }), (req, res) => {
-  const q = req.body?.query;
-  if (typeof q !== 'string' || q.length < 1 || q.length > 512)
-    return res.status(400).json({ error: 'query must be a string of 1-512 characters' });
-  if (PROBE) {
-    return res.json({ query: q, results: [],
-      note: probeNote(req, 'No search results were returned.') });
-  }
-  return res.status(501).json({ error: 'search is not implemented on this deployment' });
-});
+// Utility handlers. Reached only after payment. Each returns the real result.
+for (const u of UTIL) {
+  app.post(u.path, express.json({ limit: '256kb' }), (req, res) => {
+    try {
+      return res.json(u.run(req.body || {}));
+    } catch (e) {
+      if (e && e.bad) return res.status(400).json({ error: e.message });
+      console.error('UTIL_ERROR', JSON.stringify({ path: u.path, message: String(e && e.message) }));
+      return res.status(500).json({ error: 'could not compute the result' });
+    }
+  });
+}
 
+// Reached only once payment has been verified by the middleware.
 app.post(ROUTE, (req, res) => {
   const bad = badInput(req.body);
   if (bad) return res.status(400).json({ error: bad });
