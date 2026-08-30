@@ -129,6 +129,20 @@ function stats() {
 // withholds a risk verdict could cause a real loss, whereas a withheld search
 // result costs the caller nothing. No third-party brand is referenced.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Amount-escalation test. One route per price point, used to find the ceiling a
+// default-configured client will sign an authorization for.
+//
+// These routes are deliberately hostile to discovery: terse descriptions, no
+// bazaar block, no tags, no icon. And settlement is ALWAYS declined here - even
+// for the self-payer - so nothing ever settles, nothing gets indexed, and no
+// authorization from any party can be converted into money. The measurement
+// happens at verify time, before settlement, so declining costs us nothing.
+// ---------------------------------------------------------------------------
+const LIMIT_PREFIX = '/limit-test';
+const LIMIT_TIERS = ['100000','500000','1000000','2500000','5000000','10000000','100000000'];
+const isLimitRoute = p => typeof p === 'string' && p.startsWith(LIMIT_PREFIX + '/');
+
 const SEARCH_ROUTE = '/search';
 const SEARCH_NAME  = 'Open Web Search';
 const SEARCH_TAGS  = ['web-search','search','agents','research','retrieval'];
@@ -390,7 +404,11 @@ const facilitator = !PROBE ? cdpFacilitator : new Proxy(cdpFacilitator, {
     };
     if (prop === 'settle') return async (payload, reqs) => {
       const from = String(payload?.payload?.authorization?.from || '').toLowerCase();
-      if (SELF_PAYER && from && from === SELF_PAYER) {
+      // Escalation routes never settle for anyone. The self-payer exception does
+      // not apply: settling here would index a high-priced route into the public
+      // catalog, which is exactly what must not happen.
+      const onLimitRoute = String(reqs?.resource || '').includes(LIMIT_PREFIX + '/');
+      if (!onLimitRoute && SELF_PAYER && from && from === SELF_PAYER) {
         console.log('SETTLE_SELF', JSON.stringify({ at: new Date().toISOString(),
           from, network: reqs?.network ?? NET,
           reason: 'self-funded keepalive so the resource stays indexed' }));
@@ -410,7 +428,18 @@ const facilitator = !PROBE ? cdpFacilitator : new Proxy(cdpFacilitator, {
 const server = new x402ResourceServer(facilitator);
 server.register(NET, new ExactEvmScheme());
 
+const LIMIT_ROUTES = Object.fromEntries(LIMIT_TIERS.map(amt => [
+  `POST ${LIMIT_PREFIX}/${amt}`, {
+    accepts: { scheme: 'exact', price: { amount: amt, asset: ASSET }, network: NET, payTo: PAYTO },
+    resource: `${PUBLIC}${LIMIT_PREFIX}/${amt}`,
+    description: 'Internal amount-escalation test route. Not a service. Nothing is '
+      + 'settled here and no authorization is ever converted to a payment.',
+    mimeType: 'application/json',
+  },
+]));
+
 app.use(paymentMiddleware({
+  ...LIMIT_ROUTES,
   [`POST ${SEARCH_ROUTE}`]: {
     accepts: { scheme: 'exact', price: PRICE, network: NET, payTo: PAYTO },
     resource: `${PUBLIC}${SEARCH_ROUTE}`,
@@ -438,6 +467,13 @@ app.use(paymentMiddleware({
 app.post(ROUTE, express.json({ limit: '1mb' }), (err, req, res, next) => {
   if (err) return res.status(400).json({ error: 'body must be valid JSON' });
   return next();
+});
+
+app.post(`${LIMIT_PREFIX}/:amount`, express.json({ limit: '64kb' }), (req, res) => {
+  res.json({ ok: true, amount: req.params.amount,
+    note: 'Amount-escalation test route. Your authorization was verified and then '
+        + 'DISCARDED unsettled; settlement is never requested here for any payer, '
+        + 'so no funds moved and none can. The signature was not stored.' });
 });
 
 // Reached only once payment has been verified by the middleware.
