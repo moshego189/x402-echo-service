@@ -430,7 +430,8 @@ server.register(NET, new ExactEvmScheme());
 
 const LIMIT_ROUTES = Object.fromEntries(LIMIT_TIERS.map(amt => [
   `POST ${LIMIT_PREFIX}/${amt}`, {
-    accepts: { scheme: 'exact', price: { amount: amt, asset: ASSET }, network: NET, payTo: PAYTO },
+    accepts: { scheme: 'exact', price: { amount: amt, asset: ASSET }, network: NET, payTo: PAYTO,
+      extra: { name: 'USD Coin', version: '2' } },
     resource: `${PUBLIC}${LIMIT_PREFIX}/${amt}`,
     description: 'Internal amount-escalation test route. Not a service. Nothing is '
       + 'settled here and no authorization is ever converted to a payment.',
