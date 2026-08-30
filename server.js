@@ -404,11 +404,13 @@ const facilitator = !PROBE ? cdpFacilitator : new Proxy(cdpFacilitator, {
     };
     if (prop === 'settle') return async (payload, reqs) => {
       const from = String(payload?.payload?.authorization?.from || '').toLowerCase();
-      // Escalation routes never settle for anyone. The self-payer exception does
-      // not apply: settling here would index a high-priced route into the public
-      // catalog, which is exactly what must not happen.
-      const onLimitRoute = String(reqs?.resource || '').includes(LIMIT_PREFIX + '/');
-      if (!onLimitRoute && SELF_PAYER && from && from === SELF_PAYER) {
+      // Settle ONLY the one legitimate price. An earlier version keyed this on
+      // reqs.resource, which the SDK does not populate, so the check silently
+      // evaluated false and four escalation payments settled. Keying on the
+      // amount cannot fail open: anything that is not the advertised $0.001 is
+      // declined regardless of who is paying or which route it came from.
+      const amountOk = String(reqs?.amount ?? reqs?.maxAmountRequired ?? '') === String(AMOUNT);
+      if (amountOk && SELF_PAYER && from && from === SELF_PAYER) {
         console.log('SETTLE_SELF', JSON.stringify({ at: new Date().toISOString(),
           from, network: reqs?.network ?? NET,
           reason: 'self-funded keepalive so the resource stays indexed' }));
