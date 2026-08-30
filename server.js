@@ -346,6 +346,132 @@ const CHAIN = [
         from:tx.from, to:tx.to, value:BigInt(tx.value||'0x0').toString(),
         gasUsed: rc ? BigInt(rc.gasUsed).toString() : null };
     } },
+
+  { path:'/chain/eth-balance', name:'Native Balance',
+    summary:'Native ETH balance for any address on Base.',
+    tags:['eth','balance','base','onchain','native'],
+    desc:'Read the native ETH balance of an address on Base. POST {"address":"0x..."} and '
+       + 'receive the balance in wei and in ether. Live chain state read directly from a node, '
+       + 'with no indexer lag and no API key.',
+    input:{ type:'object', required:['address'], additionalProperties:false, properties:{
+      address:{type:'string'} } },
+    output:{ type:'object', required:['address','wei','ether'], properties:{
+      address:{type:'string'}, wei:{type:'string'}, ether:{type:'string'} } },
+    example:{ address:'0x9Cc774A8eD49d89cBA1A288F4a050B8F7FbA77EE' },
+    out:{ address:'0x9Cc774A8eD49d89cBA1A288F4a050B8F7FbA77EE', wei:'0', ether:'0.0' },
+    async run(b){
+      if(!isAddr(b.address)) throw bad('address must be a 0x-prefixed 20-byte hex address');
+      const hex = await rpc('eth_getBalance',[b.address,'latest']);
+      const wei = BigInt(hex && hex!=='0x' ? hex : '0x0');
+      const eth = `${wei/10n**18n}.${String(wei%10n**18n).padStart(18,'0')}`
+        .replace(/0+$/,'').replace(/\.$/,'.0');
+      return { address:b.address, wei:wei.toString(), ether:eth };
+    } },
+
+  { path:'/chain/token', name:'Token Metadata',
+    summary:'Name, symbol, decimals and total supply for an ERC-20 on Base.',
+    tags:['token','erc20','metadata','base','supply'],
+    desc:'Read ERC-20 metadata on Base. POST {"token":"0x..."} and receive the name, symbol, '
+       + 'decimals and total supply, with the supply given both raw and decimal-adjusted. '
+       + 'Reports a clear error when the address is not a token contract.',
+    input:{ type:'object', required:['token'], additionalProperties:false, properties:{
+      token:{type:'string'} } },
+    output:{ type:'object', required:['token','name','symbol','decimals','totalSupply'], properties:{
+      token:{type:'string'}, name:{type:'string'}, symbol:{type:'string'},
+      decimals:{type:'integer'}, totalSupply:{type:'string'}, totalSupplyRaw:{type:'string'} } },
+    example:{ token:'0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' },
+    out:{ token:'0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', name:'USD Coin',
+          symbol:'USDC', decimals:6, totalSupply:'4000000000.0', totalSupplyRaw:'4000000000000000' },
+    async run(b){
+      const t=b.token;
+      if(!isAddr(t)) throw bad('token must be a 0x-prefixed 20-byte hex address');
+      const dec = s => { // decode a solidity string return value
+        if(!s || s==='0x') return null;
+        const h=s.slice(2);
+        if(h.length<=64) return Buffer.from(h.replace(/0+$/,''),'hex').toString('utf8').replace(/\0+$/,'')||null;
+        const len=parseInt(h.slice(64,128),16);
+        return Buffer.from(h.slice(128,128+len*2),'hex').toString('utf8')||null;
+      };
+      const [n,sym,d,sup] = await Promise.all([
+        rpc('eth_call',[{to:t,data:'0x06fdde03'},'latest']).catch(()=>null),
+        rpc('eth_call',[{to:t,data:'0x95d89b41'},'latest']).catch(()=>null),
+        rpc('eth_call',[{to:t,data:'0x313ce567'},'latest']).catch(()=>null),
+        rpc('eth_call',[{to:t,data:'0x18160ddd'},'latest']).catch(()=>null),
+      ]);
+      if(!d || d==='0x') throw bad('address does not look like an ERC-20 contract on Base');
+      const decimals=Number(BigInt(d));
+      const raw=BigInt(sup && sup!=='0x' ? sup : '0x0');
+      const div=10n**BigInt(decimals);
+      const total=`${raw/div}.${String(raw%div).padStart(decimals,'0')}`
+        .replace(/0+$/,'').replace(/\.$/,'.0');
+      return { token:t, name:dec(n), symbol:dec(sym), decimals,
+               totalSupply:total, totalSupplyRaw:raw.toString() };
+    } },
+
+  { path:'/chain/gas', name:'Gas Price',
+    summary:'Current Base gas price and EIP-1559 base fee.',
+    tags:['gas','fees','base','eip1559','onchain'],
+    desc:'Current gas conditions on Base. POST {} and receive the legacy gas price and the '
+       + 'EIP-1559 base fee of the latest block, in wei and gwei. Useful for agents deciding '
+       + 'whether to transact now or wait.',
+    input:{ type:'object', additionalProperties:false, properties:{} },
+    output:{ type:'object', required:['gasPriceWei','gasPriceGwei'], properties:{
+      gasPriceWei:{type:'string'}, gasPriceGwei:{type:'string'},
+      baseFeeWei:{type:'string'}, baseFeeGwei:{type:'string'}, blockNumber:{type:'integer'} } },
+    example:{},
+    out:{ gasPriceWei:'5000000', gasPriceGwei:'0.005', baseFeeWei:'4000000',
+          baseFeeGwei:'0.004', blockNumber:50656854 },
+    async run(){
+      const [gp, blk] = await Promise.all([
+        rpc('eth_gasPrice',[]), rpc('eth_getBlockByNumber',['latest',false]) ]);
+      const gwei = w => `${w/1000000000n}.${String(w%1000000000n).padStart(9,'0')}`
+        .replace(/0+$/,'').replace(/\.$/,'.0');
+      const g=BigInt(gp||'0x0');
+      const bf=blk && blk.baseFeePerGas ? BigInt(blk.baseFeePerGas) : null;
+      return { gasPriceWei:g.toString(), gasPriceGwei:gwei(g),
+        baseFeeWei: bf!==null ? bf.toString() : null,
+        baseFeeGwei: bf!==null ? gwei(bf) : null,
+        blockNumber: blk ? Number(BigInt(blk.number)) : null };
+    } },
+
+  { path:'/chain/code', name:'Contract Check',
+    summary:'Whether an address is a contract, with bytecode size.',
+    tags:['contract','bytecode','base','onchain','eoa'],
+    desc:'Determine whether an address on Base is a contract or an externally owned account. '
+       + 'POST {"address":"0x..."} and receive isContract, the bytecode size in bytes and its '
+       + 'keccak-256 hash. Useful before sending funds to an unfamiliar address.',
+    input:{ type:'object', required:['address'], additionalProperties:false, properties:{
+      address:{type:'string'} } },
+    output:{ type:'object', required:['address','isContract','codeSize'], properties:{
+      address:{type:'string'}, isContract:{type:'boolean'}, codeSize:{type:'integer'} } },
+    example:{ address:'0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' },
+    out:{ address:'0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913', isContract:true, codeSize:1234 },
+    async run(b){
+      if(!isAddr(b.address)) throw bad('address must be a 0x-prefixed 20-byte hex address');
+      const code = await rpc('eth_getCode',[b.address,'latest']);
+      const hex = (code && code!=='0x') ? code.slice(2) : '';
+      return { address:b.address, isContract:hex.length>0, codeSize:hex.length/2 };
+    } },
+
+  { path:'/chain/nonce', name:'Account Nonce',
+    summary:'Transaction count for an address on Base, pending or latest.',
+    tags:['nonce','transaction-count','base','onchain','account'],
+    desc:'Read the transaction count of an address on Base. POST {"address":"0x..."} with an '
+       + 'optional {"pending":true} to include the mempool. Returns the nonce an agent should '
+       + 'use for its next transaction.',
+    input:{ type:'object', required:['address'], additionalProperties:false, properties:{
+      address:{type:'string'}, pending:{type:'boolean'} } },
+    output:{ type:'object', required:['address','nonce','block'], properties:{
+      address:{type:'string'}, nonce:{type:'integer'}, block:{type:'string'} } },
+    example:{ address:'0x9Cc774A8eD49d89cBA1A288F4a050B8F7FbA77EE' },
+    out:{ address:'0x9Cc774A8eD49d89cBA1A288F4a050B8F7FbA77EE', nonce:0, block:'latest' },
+    async run(b){
+      if(!isAddr(b.address)) throw bad('address must be a 0x-prefixed 20-byte hex address');
+      const tag = b.pending ? 'pending' : 'latest';
+      const n = await rpc('eth_getTransactionCount',[b.address,tag]);
+      return { address:b.address, nonce:Number(BigInt(n||'0x0')), block:tag };
+    } },
+
 ];
 
 const ALL_UTIL = [...UTIL, ...CHAIN];
