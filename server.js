@@ -627,8 +627,9 @@ const SEARCH_BAZAAR = {
 
 const OPENAPI = pub => ({
   openapi: '3.1.0',
-  info: { title: 'x402 Research Echo', version: '1.0.0',
-    description: GUIDANCE, 'x-guidance': GUIDANCE },
+  info: { title: 'x402 Utility API', version: '1.1.0',
+    description: GUIDANCE, 'x-guidance': GUIDANCE,
+    contact: { name: 'x402 Utility API', url: pub } },
   servers: [{ url: pub }],
   'x-payment-info': { price: { mode: 'fixed', currency: 'USD', amount: '0.001' },
     protocols: [{ x402: { network: NET, scheme: 'exact', asset: ASSET, payTo: PAYTO, amount: AMOUNT } }] },
@@ -640,6 +641,25 @@ const OPENAPI = pub => ({
     '/openapi.json': { get: { operationId: 'openapi', summary: 'This OpenAPI document', security: [],
       responses: { 200: { description: 'OpenAPI document',
         content: { 'application/json': { schema: { type: 'object' } } } } } } },
+    ...Object.fromEntries(ALL_UTIL.map(u => [u.path, { post: {
+      operationId: u.path.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, ''),
+      summary: u.summary,
+      description: u.desc, 'x-guidance': u.desc,
+      'x-payment-info': { price: { mode:'fixed', currency:'USD', amount:'0.001' },
+        protocols: [{ x402: { network:NET, scheme:'exact', asset:ASSET, payTo:PAYTO, amount:AMOUNT } }] },
+      requestBody: { required: true, content: { 'application/json':
+        { schema: u.input, example: u.example } } },
+      responses: {
+        200: { description: u.summary,
+          content: { 'application/json': { schema: u.output,
+            example: u.out ?? undefined } } },
+        400: { description: 'Invalid input',
+          content: { 'application/json': { schema: { type:'object',
+            properties:{ error:{type:'string'} } } } } },
+        402: { description: 'Payment Required (x402)',
+          content: { 'application/json': { schema: { type:'object' } } } },
+      },
+    } }])),
     [ROUTE]: { post: { operationId: 'echo', summary: 'Echo a message with its SHA-256 digest',
       description: GUIDANCE, 'x-guidance': GUIDANCE,
       'x-payment-info': { price: { mode: 'fixed', currency: 'USD', amount: '0.001' },
