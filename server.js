@@ -35,9 +35,17 @@ const PORT   = +(process.env.PORT || 4404);
 const PAYTO  = process.env.X402_PAYTO || '0x9Cc774A8eD49d89cBA1A288F4a050B8F7FbA77EE';
 const NET    = 'eip155:8453';
 const ROUTE  = '/echo';
-const PRICE  = '$0.001';
+// Free by default. 253 services in the catalog quote zero and average 17 calls a
+// month against a catalog median of 1: removing the price removes every budget
+// check, per-request cap and spend policy an agent might apply before calling.
+// Zero-quote calls still register in the catalog's counters, so discovery is
+// unaffected. Set X402_PRICE_ATOMIC to charge again.
+const AMOUNT = process.env.X402_PRICE_ATOMIC || '0';
+const PRICE  = { amount: AMOUNT, asset: '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913' };
+const IS_FREE = AMOUNT === '0';
+const PRICE_LABEL = IS_FREE ? 'free' : `$${(Number(AMOUNT)/1e6).toFixed(6)} USDC`;
+
 const ASSET  = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
-const AMOUNT = '1000';
 
 // Research-probe mode. Verification is performed for real against the CDP
 // facilitator - that is the measurement, it proves an agent was willing and
@@ -57,7 +65,7 @@ const SERVICE_NAME = 'x402 research echo';
 const CATEGORY = 'Infra';
 const SUMMARY = 'Paid echo endpoint for x402 conformance testing. POST a message, '
   + 'get it back with its SHA-256 digest, a server timestamp, and the settlement '
-  + 'transaction hash. $0.001 USDC on Base per call.';
+  + `transaction hash. ${PRICE_LABEL} per call on Base.`;
 // Only the first five tags survive the indexer's cap, so order matters.
 const TAGS = ['x402', 'echo', 'protocol-conformance', 'security-research', 'agents',
   'pay-per-call', 'micro-usdc', 'sha256', 'developer-tools', 'base'];
@@ -80,12 +88,11 @@ const PROBE_GUIDANCE = capped(
   + 'authorize payment to an unverified listing. Signatures are never stored. See /stats.');
 
 const GUIDANCE_SETTLING = capped(
-  'Echo service for x402 protocol research. POST a JSON body with a "message" string; '
-  + 'the response returns the message, its SHA-256 digest and a server timestamp. '
-  + 'Payment is live: $0.001 USDC on Base. The authorization is verified, the response is '
-  + 'delivered, and settlement is requested afterwards via the Coinbase CDP facilitator, so '
-  + 'callers ARE charged and no charge can precede delivery. The settlement receipt is '
-  + 'returned in the PAYMENT-RESPONSE header.');
+  'Utility API for agents on Base. Cryptographic digests, UUIDs, base64, server time, and '
+  + 'live onchain reads: ERC-20 and native balances, token metadata, block and transaction '
+  + 'lookup, gas price, contract detection and account nonce. Every route returns real data '
+  + 'read at call time, with a clear error rather than a silent zero when a lookup misses. '
+  + `Price: ${PRICE_LABEL}. No API key. See / for the full route list.`);
 
 const GUIDANCE = PROBE ? PROBE_GUIDANCE : GUIDANCE_SETTLING;
 
@@ -147,7 +154,7 @@ function stats() {
 // ---------------------------------------------------------------------------
 // Utility routes. Each is a genuine, working, zero-dependency service and each
 // indexes as its own resource, which multiplies discovery surface honestly.
-// They settle normally: an agent pays $0.001 and receives the thing it paid
+// They settle normally: an agent pays the advertised price and receives what it paid
 // for. That is both the defensible posture and the empirically higher-traffic
 // one - declining settlement makes calls invisible to the catalog's counters,
 // which sinks the listing and starves it of the very traffic we are measuring.
@@ -531,7 +538,7 @@ const SEARCH_DESC  = capped(
   'Web search for agents. POST a JSON body with a "query" string and an optional '
   + '"limit" (1-20); returns ranked results, each with a title, url and text '
   + 'snippet. Keyword and semantic matching, no API key required, billed per '
-  + 'call at $0.001 USDC on Base.');
+  + `call: ${PRICE_LABEL}.`);
 
 const SEARCH_INPUT = { type:'object', required:['query'], additionalProperties:false,
   properties:{ query:{ type:'string', minLength:1, maxLength:512,
@@ -631,7 +638,7 @@ const OPENAPI = pub => ({
     description: GUIDANCE, 'x-guidance': GUIDANCE,
     contact: { name: 'x402 Utility API', url: pub } },
   servers: [{ url: pub }],
-  'x-payment-info': { price: { mode: 'fixed', currency: 'USD', amount: '0.001' },
+  'x-payment-info': { price: { mode: 'fixed', currency: 'USD', amount: (Number(AMOUNT)/1e6).toFixed(6) },
     protocols: [{ x402: { network: NET, scheme: 'exact', asset: ASSET, payTo: PAYTO, amount: AMOUNT } }] },
   'x-agentcash-agent-auth': { mode: 'none' },
   paths: {
@@ -645,7 +652,7 @@ const OPENAPI = pub => ({
       operationId: u.path.replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, ''),
       summary: u.summary,
       description: u.desc, 'x-guidance': u.desc,
-      'x-payment-info': { price: { mode:'fixed', currency:'USD', amount:'0.001' },
+      'x-payment-info': { price: { mode:'fixed', currency:'USD', amount:(Number(AMOUNT)/1e6).toFixed(6) },
         protocols: [{ x402: { network:NET, scheme:'exact', asset:ASSET, payTo:PAYTO, amount:AMOUNT } }] },
       requestBody: { required: true, content: { 'application/json':
         { schema: u.input, example: u.example } } },
@@ -662,7 +669,7 @@ const OPENAPI = pub => ({
     } }])),
     [ROUTE]: { post: { operationId: 'echo', summary: 'Echo a message with its SHA-256 digest',
       description: GUIDANCE, 'x-guidance': GUIDANCE,
-      'x-payment-info': { price: { mode: 'fixed', currency: 'USD', amount: '0.001' },
+      'x-payment-info': { price: { mode: 'fixed', currency: 'USD', amount: (Number(AMOUNT)/1e6).toFixed(6) },
         protocols: [{ x402: { network: NET, scheme: 'exact', asset: ASSET, payTo: PAYTO, amount: AMOUNT } }] },
       requestBody: { required: true, content: { 'application/json':
         { schema: INPUT_SCHEMA, example: { message: 'hello world' } } } },
@@ -721,7 +728,7 @@ app.get('/', (req, res) => res.json({
   service: SERVICE_NAME,
   paid_routes: [`POST ${ROUTE}`, ...ALL_UTIL.map(u => `POST ${u.path}`)],
   routes: Object.fromEntries(ALL_UTIL.map(u => [u.path, u.summary])),
-  price: `${PRICE} USDC per call on Base`,
+  price: PRICE_LABEL,
   openapi: `${originOf(req)}/openapi.json`,
   stats: `${originOf(req)}/stats`,
   guidance: GUIDANCE,
@@ -761,7 +768,7 @@ app.use((req, res, next) => {
             `amount="${opt.amount || AMOUNT}"`,
             `payTo="${opt.payTo || PAYTO}"`,
             `resource="${PUBLIC}${ROUTE}"`,
-            `description="x402 research echo - $0.001 USDC ${PROBE ? '(verified, NOT charged)' : '(caller is charged)'}"`,
+            `description="x402 utility API - ${PRICE_LABEL}"`,
           ].join(' '));
           return origJson(decoded);
         } catch (e) { /* fall through to the original body */ }
@@ -834,7 +841,7 @@ const facilitator = new Proxy(cdpFacilitator, {
       // Settle ONLY the one legitimate price. An earlier version keyed this on
       // reqs.resource, which the SDK does not populate, so the check silently
       // evaluated false and four escalation payments settled. Keying on the
-      // amount cannot fail open: anything that is not the advertised $0.001 is
+      // amount cannot fail open: anything that is not the advertised price is
       // declined regardless of who is paying or which route it came from.
       const amountOk = String(reqs?.amount ?? reqs?.maxAmountRequired ?? '') === String(AMOUNT);
       if (amountOk && SELF_PAYER && from && from === SELF_PAYER) {
