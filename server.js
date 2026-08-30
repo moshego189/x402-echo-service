@@ -236,6 +236,120 @@ const UTIL = [
     } },
 ];
 
+// Onchain read routes. Real data from public Base RPC. This is the highest-demand
+// category in the catalog by unique payers - basic chain reads draw 700-1100
+// unique payers per endpoint for the largest operator - and it can be served
+// honestly with no upstream cost.
+const RPCS = ['https://base.llamarpc.com','https://base-rpc.publicnode.com','https://mainnet.base.org'];
+const USDC_BASE = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
+
+async function rpc(method, params){
+  let lastErr;
+  for (const url of RPCS){
+    try{
+      const ctl = new AbortController();
+      const t = setTimeout(()=>ctl.abort(), 8000);
+      const r = await fetch(url, { method:'POST', signal:ctl.signal,
+        headers:{'content-type':'application/json','user-agent':'x402-utility/1.0'},
+        body: JSON.stringify({jsonrpc:'2.0',id:1,method,params}) });
+      clearTimeout(t);
+      const j = await r.json();
+      if (j && j.result !== undefined) return j.result;
+      lastErr = new Error(j?.error?.message || 'rpc error');
+    }catch(e){ lastErr = e; }
+  }
+  throw lastErr || new Error('all rpc endpoints failed');
+}
+const isAddr = a => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a);
+const bad = m => { const e = new Error(m); e.bad = true; return e; };
+
+const CHAIN = [
+  { path:'/chain/erc20-balance', name:'ERC-20 Balance',
+    summary:'Token balance for any address on Base, decimals applied.',
+    tags:['erc20','balance','base','onchain','token'],
+    desc:'Read an ERC-20 token balance on Base. POST {"address":"0x...","token":"0x..."} and '
+       + 'receive the raw balance, the token decimals and the human-readable amount. Defaults '
+       + 'to USDC when token is omitted. Live chain state, no indexer lag.',
+    input:{ type:'object', required:['address'], additionalProperties:false, properties:{
+      address:{type:'string',description:'Account to read.'},
+      token:{type:'string',description:'ERC-20 contract. Defaults to USDC on Base.'} } },
+    output:{ type:'object', required:['address','token','raw','decimals','amount'], properties:{
+      address:{type:'string'}, token:{type:'string'}, raw:{type:'string'},
+      decimals:{type:'integer'}, amount:{type:'string'} } },
+    example:{ address:'0x9Cc774A8eD49d89cBA1A288F4a050B8F7FbA77EE' },
+    out:{ address:'0x9Cc774A8eD49d89cBA1A288F4a050B8F7FbA77EE', token:USDC_BASE,
+          raw:'4111000', decimals:6, amount:'4.111' },
+    async run(b){
+      const a=b.address, t=b.token || USDC_BASE;
+      if(!isAddr(a)) throw bad('address must be a 0x-prefixed 20-byte hex address');
+      if(!isAddr(t)) throw bad('token must be a 0x-prefixed 20-byte hex address');
+      const [balHex, decHex] = await Promise.all([
+        rpc('eth_call',[{to:t,data:'0x70a08231'+a.slice(2).toLowerCase().padStart(64,'0')},'latest']),
+        rpc('eth_call',[{to:t,data:'0x313ce567'},'latest']),
+      ]);
+      const raw = BigInt(balHex && balHex!=='0x' ? balHex : '0x0');
+      const dec = Number(BigInt(decHex && decHex!=='0x' ? decHex : '0x12'));
+      const d = 10n ** BigInt(dec);
+      const amount = `${raw/d}.${String(raw%d).padStart(dec,'0')}`.replace(/0+$/,'').replace(/\.$/,'.0');
+      return { address:a, token:t, raw:raw.toString(), decimals:dec, amount };
+    } },
+
+  { path:'/chain/block', name:'Base Block',
+    summary:'Latest Base block number, hash, timestamp and gas used.',
+    tags:['block','base','onchain','chain-head','rpc'],
+    desc:'Read the head of the Base chain, or a specific block. POST {} for the latest block, '
+       + 'or {"number":12345678} for one by height. Returns number, hash, unix timestamp, gas '
+       + 'used and transaction count. Useful as an authoritative chain clock.',
+    input:{ type:'object', additionalProperties:false, properties:{
+      number:{type:'integer',minimum:0,description:'Block height. Omit for the chain head.'} } },
+    output:{ type:'object', required:['number','hash','timestamp','transactions'], properties:{
+      number:{type:'integer'}, hash:{type:'string'}, timestamp:{type:'integer'},
+      iso8601:{type:'string'}, gasUsed:{type:'string'}, transactions:{type:'integer'} } },
+    example:{},
+    out:{ number:34567890, hash:'0x'+'ab'.repeat(32), timestamp:1787750000,
+          iso8601:'2026-08-30T12:00:00.000Z', gasUsed:'12345678', transactions:142 },
+    async run(b){
+      const tag = (b.number===undefined||b.number===null) ? 'latest' : '0x'+Number(b.number).toString(16);
+      const blk = await rpc('eth_getBlockByNumber',[tag,false]);
+      if(!blk) throw bad('block not found');
+      const ts = Number(BigInt(blk.timestamp));
+      return { number:Number(BigInt(blk.number)), hash:blk.hash, timestamp:ts,
+        iso8601:new Date(ts*1000).toISOString(), gasUsed:BigInt(blk.gasUsed).toString(),
+        transactions:(blk.transactions||[]).length };
+    } },
+
+  { path:'/chain/tx', name:'Transaction Lookup',
+    summary:'Status, block, gas and transfer details for a Base transaction.',
+    tags:['transaction','receipt','base','onchain','lookup'],
+    desc:'Look up a transaction on Base by hash. POST {"hash":"0x..."} and receive its status, '
+       + 'block number, from and to addresses, value, gas used and effective gas price. Returns '
+       + 'a clear not-found rather than an empty object when the hash is unknown.',
+    input:{ type:'object', required:['hash'], additionalProperties:false, properties:{
+      hash:{type:'string',description:'32-byte transaction hash.'} } },
+    output:{ type:'object', required:['hash','found'], properties:{
+      hash:{type:'string'}, found:{type:'boolean'}, status:{type:'string'},
+      blockNumber:{type:'integer'}, from:{type:'string'}, to:{type:'string'},
+      value:{type:'string'}, gasUsed:{type:'string'} } },
+    example:{ hash:'0x962895f4b604ce745b6cd76e588d62fcf4fb59f9d6e67d0a17a7769f6ab15e4e' },
+    out:{ hash:'0x9628…5e4e', found:true, status:'success', blockNumber:34500000,
+          from:'0x368C…9716', to:USDC_BASE, value:'0', gasUsed:'64210' },
+    async run(b){
+      const h=b.hash;
+      if(typeof h!=='string' || !/^0x[0-9a-fA-F]{64}$/.test(h))
+        throw bad('hash must be a 0x-prefixed 32-byte hex string');
+      const [tx, rc] = await Promise.all([
+        rpc('eth_getTransactionByHash',[h]), rpc('eth_getTransactionReceipt',[h]) ]);
+      if(!tx) return { hash:h, found:false };
+      return { hash:h, found:true,
+        status: rc ? (BigInt(rc.status)===1n ? 'success' : 'reverted') : 'pending',
+        blockNumber: tx.blockNumber ? Number(BigInt(tx.blockNumber)) : null,
+        from:tx.from, to:tx.to, value:BigInt(tx.value||'0x0').toString(),
+        gasUsed: rc ? BigInt(rc.gasUsed).toString() : null };
+    } },
+];
+
+const ALL_UTIL = [...UTIL, ...CHAIN];
+
 // keccak-256, stdlib only, so /hash has no dependency.
 function keccak256Hex(str){
   const RC=[1n,0x8082n,0x800000000000808an,0x8000000080008000n,0x808bn,0x80000001n,
@@ -459,8 +573,8 @@ app.set('trust proxy', true);
 // Free routes are registered BEFORE the payment middleware, so they stay free.
 app.get('/', (req, res) => res.json({
   service: SERVICE_NAME,
-  paid_routes: [`POST ${ROUTE}`, ...UTIL.map(u => `POST ${u.path}`)],
-  routes: Object.fromEntries(UTIL.map(u => [u.path, u.summary])),
+  paid_routes: [`POST ${ROUTE}`, ...ALL_UTIL.map(u => `POST ${u.path}`)],
+  routes: Object.fromEntries(ALL_UTIL.map(u => [u.path, u.summary])),
   price: `${PRICE} USDC per call on Base`,
   openapi: `${originOf(req)}/openapi.json`,
   stats: `${originOf(req)}/stats`,
@@ -514,7 +628,7 @@ app.use((req, res, next) => {
 
 // Reject wrong methods on the paid path before the middleware sees them, so the
 // 402 challenge and the OpenAPI document cannot disagree about the verb.
-for (const u of UTIL) {
+for (const u of ALL_UTIL) {
   app.all(u.path, (req, res, next) => {
     if (req.method !== 'POST') return res.status(405).set('allow', 'POST')
       .json({ error: 'method not allowed', allow: 'POST' });
@@ -605,7 +719,7 @@ function utilBazaar(u){
     tags: u.tags,
     coverImage: `${PUBLIC}/icon.png`,
     info: { input:{ type:'http', method:'POST', bodyType:'json', body:u.example },
-            output:{ type:'json', example:u.run(u.example) } },
+            output:{ type:'json', example:u.out ?? u.run(u.example) } },
     schema: { $schema:'https://json-schema.org/draft/2020-12/schema',
       type:'object', required:['input','output'],
       properties:{
@@ -617,7 +731,7 @@ function utilBazaar(u){
   };
 }
 
-const UTIL_ROUTES = Object.fromEntries(UTIL.map(u => [
+const UTIL_ROUTES = Object.fromEntries(ALL_UTIL.map(u => [
   `POST ${u.path}`, {
     accepts: { scheme:'exact', price:PRICE, network:NET, payTo:PAYTO,
                extra:{ name:'USD Coin', version:'2' } },
@@ -671,10 +785,10 @@ app.post(`${LIMIT_PREFIX}/:amount`, express.json({ limit: '64kb' }), (req, res) 
 });
 
 // Utility handlers. Reached only after payment. Each returns the real result.
-for (const u of UTIL) {
-  app.post(u.path, express.json({ limit: '256kb' }), (req, res) => {
+for (const u of ALL_UTIL) {
+  app.post(u.path, express.json({ limit: '256kb' }), async (req, res) => {
     try {
-      return res.json(u.run(req.body || {}));
+      return res.json(await u.run(req.body || {}));
     } catch (e) {
       if (e && e.bad) return res.status(400).json({ error: e.message });
       console.error('UTIL_ERROR', JSON.stringify({ path: u.path, message: String(e && e.message) }));
