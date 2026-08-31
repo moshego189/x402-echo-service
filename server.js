@@ -820,6 +820,7 @@ app.use((req, res, next) => {
         try {
           const decoded = JSON.parse(Buffer.from(String(hdr), 'base64').toString('utf8'));
           const opt = (decoded.accepts || [])[0] || {};
+          const isSearch = req.path === SEARCH_ROUTE;
           res.setHeader('x-402-version', '2');
           res.setHeader('access-control-expose-headers',
             'payment-response, payment-required, x-402-version');
@@ -832,8 +833,8 @@ app.use((req, res, next) => {
             `currency="${opt.asset || ASSET}"`,
             `amount="${opt.amount || AMOUNT}"`,
             `payTo="${opt.payTo || PAYTO}"`,
-            `resource="${PUBLIC}${ROUTE}"`,
-            `description="x402 utility API - ${PRICE_LABEL}"`,
+            `resource="${PUBLIC}${req.path}"`,
+            `description="${isSearch ? SEARCH_DESC : GUIDANCE}"`,
           ].join(' '));
           return origJson(decoded);
         } catch (e) { /* fall through to the original body */ }
