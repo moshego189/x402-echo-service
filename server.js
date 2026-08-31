@@ -481,7 +481,108 @@ const CHAIN = [
 
 ];
 
-const ALL_UTIL = [...UTIL, ...CHAIN];
+// Real search over keyless upstreams. Named for the corpus they actually cover -
+// not "web search", which this service cannot honestly provide without a paid
+// search API. The withdrawn /search route advertised web search and returned
+// nothing; these return real results and say exactly what they cover.
+const stripTags = t => String(t || '')
+  .replace(/<[^>]*>/g, '')
+  .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'")
+  .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&nbsp;/g, ' ').trim();
+
+async function getJson(url, timeoutMs = 9000){
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { signal: ctl.signal,
+      headers: { 'user-agent': 'x402-utility/1.0 (+https://x402-echo-service.onrender.com)',
+                 'accept': 'application/json' } });
+    if (!r.ok) throw new Error(`upstream returned ${r.status}`);
+    return await r.json();
+  } finally { clearTimeout(t); }
+}
+
+const SEARCH = [
+  { path:'/search/wikipedia', name:'Wikipedia Search',
+    summary:'Search Wikipedia articles and get titles, URLs and matching snippets.',
+    tags:['search','wikipedia','knowledge','reference','research'],
+    desc:'Search English Wikipedia. POST {"query":"...","limit":5} and receive matching '
+       + 'articles with title, canonical URL, a plain-text snippet of the match and the '
+       + 'word count. Covers Wikipedia only, not the open web. No API key, results read '
+       + 'live from the MediaWiki API at call time.',
+    input:{ type:'object', required:['query'], additionalProperties:false, properties:{
+      query:{type:'string',minLength:1,maxLength:300},
+      limit:{type:'integer',minimum:1,maximum:20,default:5} } },
+    output:{ type:'object', required:['query','totalHits','results'], properties:{
+      query:{type:'string'}, totalHits:{type:'integer'},
+      results:{ type:'array', items:{ type:'object',
+        required:['title','url','snippet'],
+        properties:{ title:{type:'string'}, url:{type:'string'},
+                     snippet:{type:'string'}, wordCount:{type:'integer'} } } } } },
+    example:{ query:'Ethereum smart contract', limit:3 },
+    out:{ query:'Ethereum smart contract', totalHits:412, results:[
+      { title:'Example article', url:'https://en.wikipedia.org/wiki/Example',
+        snippet:'A plain-text extract of the matching passage.', wordCount:1234 }] },
+    async run(b){
+      const q=b.query;
+      if(typeof q!=='string' || !q.trim() || q.length>300)
+        throw bad('query must be a non-empty string of at most 300 characters');
+      const n=Math.min(20,Math.max(1,parseInt(b.limit??5,10)||5));
+      const u='https://en.wikipedia.org/w/api.php?action=query&list=search'
+        +`&srsearch=${encodeURIComponent(q)}&srlimit=${n}&format=json&origin=*`;
+      const d=await getJson(u);
+      const hits=d?.query?.search || [];
+      return { query:q, totalHits:d?.query?.searchinfo?.totalhits ?? hits.length,
+        results:hits.map(h=>({
+          title:h.title,
+          url:`https://en.wikipedia.org/wiki/${encodeURIComponent(String(h.title).replace(/ /g,'_'))}`,
+          snippet:stripTags(h.snippet), wordCount:h.wordcount ?? null })) };
+    } },
+
+  { path:'/search/hackernews', name:'Hacker News Search',
+    summary:'Search Hacker News stories and comments by relevance or recency.',
+    tags:['search','hackernews','news','tech','discussion'],
+    desc:'Search Hacker News via the Algolia index. POST {"query":"...","limit":5} and '
+       + 'receive matching stories with title, URL, points, author, comment count and '
+       + 'timestamp. Add {"sort":"recent"} for newest-first instead of relevance. Covers '
+       + 'Hacker News only. No API key.',
+    input:{ type:'object', required:['query'], additionalProperties:false, properties:{
+      query:{type:'string',minLength:1,maxLength:300},
+      limit:{type:'integer',minimum:1,maximum:20,default:5},
+      sort:{enum:['relevance','recent']} } },
+    output:{ type:'object', required:['query','totalHits','results'], properties:{
+      query:{type:'string'}, totalHits:{type:'integer'},
+      results:{ type:'array', items:{ type:'object',
+        required:['title','hnUrl'],
+        properties:{ title:{type:'string'}, url:{type:'string'}, hnUrl:{type:'string'},
+                     points:{type:'integer'}, author:{type:'string'},
+                     comments:{type:'integer'}, createdAt:{type:'string'} } } } } },
+    example:{ query:'x402 protocol', limit:3 },
+    out:{ query:'x402 protocol', totalHits:54838, results:[
+      { title:'Example story', url:'https://example.com',
+        hnUrl:'https://news.ycombinator.com/item?id=1', points:42,
+        author:'someone', comments:7, createdAt:'2026-08-01T00:00:00Z' }] },
+    async run(b){
+      const q=b.query;
+      if(typeof q!=='string' || !q.trim() || q.length>300)
+        throw bad('query must be a non-empty string of at most 300 characters');
+      const n=Math.min(20,Math.max(1,parseInt(b.limit??5,10)||5));
+      const path=b.sort==='recent' ? 'search_by_date' : 'search';
+      const d=await getJson(`https://hn.algolia.com/api/v1/${path}`
+        +`?query=${encodeURIComponent(q)}&hitsPerPage=${n}`);
+      const hits=d?.hits || [];
+      return { query:q, totalHits:d?.nbHits ?? hits.length,
+        results:hits.map(h=>({
+          title:h.title || h.story_title || '(comment)',
+          url:h.url || h.story_url || null,
+          hnUrl:`https://news.ycombinator.com/item?id=${h.objectID}`,
+          points:h.points ?? null, author:h.author ?? null,
+          comments:h.num_comments ?? null, createdAt:h.created_at ?? null })) };
+    } },
+];
+
+const ALL_UTIL = [...UTIL, ...CHAIN, ...SEARCH];
 
 // keccak-256, stdlib only, so /hash has no dependency.
 function keccak256Hex(str){
