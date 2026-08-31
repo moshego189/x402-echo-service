@@ -270,6 +270,53 @@ async function rpc(method, params){
 const isAddr = a => typeof a === 'string' && /^0x[0-9a-fA-F]{40}$/.test(a);
 const bad = m => { const e = new Error(m); e.bad = true; return e; };
 
+async function webSearch(query, limit) {
+  const q = String(query).trim();
+  if (!q) throw bad('query must be a non-empty string');
+  const l = Math.min(20, Math.max(1, parseInt(limit ?? 5, 10) || 5));
+
+  const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const resp = await fetch(url, {
+      headers: { 'user-agent': 'Mozilla/5.0 (compatible; x402-search/1.0)' },
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    if (!resp.ok) throw new Error('upstream returned ' + resp.status);
+    const html = await resp.text();
+
+    const results = [];
+    const seen = new Set();
+
+    const re = /<a[^>]+rel="nofollow"[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([^<]+)<\/a>/g;
+    let m;
+    while ((m = re.exec(html)) !== null && results.length < l) {
+      const u = m[1], t = m[2].trim();
+      if (seen.has(u)) continue;
+      seen.add(u);
+      results.push({ title: t, url: u, snippet: '' });
+    }
+
+    if (results.length > 0) {
+      const snipRe = /<a[^>]+class="result__snippet"[^>]*>(.*?)<\/a>/gs;
+      let idx = 0;
+      let s;
+      while ((s = snipRe.exec(html)) !== null && idx < results.length) {
+        results[idx].snippet = s[1].replace(/<[^>]+>/g, '').trim();
+        idx++;
+      }
+    }
+
+    return { query: q, results };
+  } catch (e) {
+    clearTimeout(timer);
+    if (e && e.name === 'AbortError') throw bad('search timed out');
+    throw bad('search failed: ' + (e.message || 'network error'));
+  }
+}
+
 const CHAIN = [
   { path:'/chain/erc20-balance', name:'ERC-20 Balance',
     summary:'Token balance for any address on Base, decimals applied.',
@@ -525,7 +572,7 @@ const LIMIT_PREFIX = '/limit-test';
 const LIMIT_TIERS = ['100000','500000','1000000','2500000','5000000','10000000','100000000'];
 const isLimitRoute = p => typeof p === 'string' && p.startsWith(LIMIT_PREFIX + '/');
 
-const SEARCH_ROUTE = '/search';
+const SEARCH_ROUTE = '/web/search';
 const SEARCH_NAME  = 'Open Web Search';
 const SEARCH_TAGS  = ['web-search','search','agents','research','retrieval'];
 // Functional only, and it makes no claim about result quality. The probe
@@ -664,9 +711,27 @@ const OPENAPI = pub => ({
           content: { 'application/json': { schema: { type:'object',
             properties:{ error:{type:'string'} } } } } },
         402: { description: 'Payment Required (x402)',
-          content: { 'application/json': { schema: { type:'object' } } } },
+          content: { 'application/json': { schema: { type: 'object' } } } },
       },
     } }])),
+    [SEARCH_ROUTE]: { post: { operationId: 'web_search', summary: SEARCH_NAME,
+      description: SEARCH_DESC, 'x-guidance': SEARCH_DESC,
+      'x-payment-info': { price: { mode:'fixed', currency:'USD', amount:(Number(AMOUNT)/1e6).toFixed(6) },
+        protocols: [{ x402: { network:NET, scheme:'exact', asset:ASSET, payTo:PAYTO, amount:AMOUNT } }] },
+      requestBody: { required: true, content: { 'application/json':
+        { schema: SEARCH_INPUT, example: { query:'x402 protocol', limit:5 } } } },
+      responses: {
+        200: { description: 'Search results',
+          content: { 'application/json': { schema: SEARCH_OUTPUT,
+            example: { query:'x402 protocol', results:[
+              { title:'Example result', url:'https://example.com/a', snippet:'A short extract.' }] } } } },
+        400: { description: 'Invalid input',
+          content: { 'application/json': { schema: { type:'object',
+            properties:{ error:{type:'string'} } } } } },
+        402: { description: 'Payment Required (x402)',
+          content: { 'application/json': { schema: { type: 'object' } } } },
+      },
+    } },
     [ROUTE]: { post: { operationId: 'echo', summary: 'Echo a message with its SHA-256 digest',
       description: GUIDANCE, 'x-guidance': GUIDANCE,
       'x-payment-info': { price: { mode: 'fixed', currency: 'USD', amount: (Number(AMOUNT)/1e6).toFixed(6) },
@@ -726,8 +791,8 @@ app.set('trust proxy', true);
 // Free routes are registered BEFORE the payment middleware, so they stay free.
 app.get('/', (req, res) => res.json({
   service: SERVICE_NAME,
-  paid_routes: [`POST ${ROUTE}`, ...ALL_UTIL.map(u => `POST ${u.path}`)],
-  routes: Object.fromEntries(ALL_UTIL.map(u => [u.path, u.summary])),
+  paid_routes: [`POST ${ROUTE}`, `POST ${SEARCH_ROUTE}`, ...ALL_UTIL.map(u => `POST ${u.path}`)],
+  routes: Object.fromEntries([['/web/search', 'Web search'], ...ALL_UTIL.map(u => [u.path, u.summary])]),
   price: PRICE_LABEL,
   openapi: `${originOf(req)}/openapi.json`,
   stats: `${originOf(req)}/stats`,
@@ -789,15 +854,12 @@ for (const u of ALL_UTIL) {
   });
 }
 
-// /search was a probe route that returned no results. It is already indexed, so
-// agents may still find it: answer honestly and for free rather than take payment
-// for an empty response. The catalog prunes it on its own.
-app.all(SEARCH_ROUTE, (_req, res) => res.status(410).json({
-  error: 'withdrawn',
-  detail: 'This route was a research probe and returned no search results. It has been '
-        + 'withdrawn rather than charged for. GET / lists the utility routes this '
-        + 'service actually provides.',
-}));
+// Reject wrong methods on paid search before the middleware sees them.
+app.all(SEARCH_ROUTE, (req, res, next) => {
+  if (req.method !== 'POST') return res.status(405).set('allow', 'POST')
+    .json({ error: 'method not allowed', allow: 'POST' });
+  next();
+});
 
 app.all(ROUTE, (req, res, next) => {
   if (req.method !== 'POST') return res.status(405).set('allow', 'POST')
@@ -911,6 +973,17 @@ const LIMIT_ROUTES = Object.fromEntries(LIMIT_TIERS.map(amt => [
 
 app.use(paymentMiddleware({
   ...UTIL_ROUTES,
+  [`POST ${SEARCH_ROUTE}`]: {
+    accepts: { scheme: 'exact', price: PRICE, network: NET, payTo: PAYTO,
+      extra:{ name:'USD Coin', version:'2' } },
+    resource: `${PUBLIC}${SEARCH_ROUTE}`,
+    description: SEARCH_DESC,
+    mimeType: 'application/json',
+    serviceName: SEARCH_NAME,
+    tags: SEARCH_TAGS,
+    iconUrl: `${PUBLIC}/icon.png`,
+    extensions: { bazaar: SEARCH_BAZAAR },
+  },
   [`POST ${ROUTE}`]: {
     accepts: { scheme: 'exact', price: PRICE, network: NET, payTo: PAYTO },
     resource: `${PUBLIC}${ROUTE}`,
@@ -960,6 +1033,16 @@ app.post(ROUTE, (req, res) => {
     timestamp: new Date().toISOString() };
   if (PROBE) body.note = probeNote(req);
   res.json(body);
+});
+
+app.post(SEARCH_ROUTE, express.json({ limit: '256kb' }), async (req, res) => {
+  try {
+    return res.json(await webSearch(req.body?.query, req.body?.limit));
+  } catch (e) {
+    if (e && e.bad) return res.status(400).json({ error: e.message });
+    console.error('SEARCH_ERROR', JSON.stringify({ message: String(e && e.message) }));
+    return res.status(500).json({ error: 'search failed' });
+  }
 });
 
 app.listen(PORT, () => {
