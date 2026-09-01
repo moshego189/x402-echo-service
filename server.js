@@ -287,14 +287,29 @@ async function webSearch(query, limit) {
     if (!resp.ok) throw new Error('upstream returned ' + resp.status);
     const html = await resp.text();
 
+    // DuckDuckGo wraps every href in its own redirector:
+    //   //duckduckgo.com/l/?uddg=<urlencoded target>&amp;rut=<hash>
+    // Returned verbatim that is unusable to an agent - protocol-relative, HTML
+    // escaped, and the real target buried in a query param. Unwrap to the target.
+    const unwrap = href => {
+      let u = String(href || '').replace(/&amp;/g, '&');
+      const m = /[?&]uddg=([^&]+)/.exec(u);
+      if (m) { try { u = decodeURIComponent(m[1]); } catch {} }
+      if (u.startsWith('//')) u = 'https:' + u;
+      return u;
+    };
+    const unescape = t => String(t || '')
+      .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#x27;|&#0?39;/g, "'")
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ').trim();
+
     const results = [];
     const seen = new Set();
 
     const re = /<a[^>]+rel="nofollow"[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([^<]+)<\/a>/g;
     let m;
     while ((m = re.exec(html)) !== null && results.length < l) {
-      const u = m[1], t = m[2].trim();
-      if (seen.has(u)) continue;
+      const u = unwrap(m[1]), t = unescape(m[2]);
+      if (!u || seen.has(u)) continue;
       seen.add(u);
       results.push({ title: t, url: u, snippet: '' });
     }
@@ -304,7 +319,7 @@ async function webSearch(query, limit) {
       let idx = 0;
       let s;
       while ((s = snipRe.exec(html)) !== null && idx < results.length) {
-        results[idx].snippet = s[1].replace(/<[^>]+>/g, '').trim();
+        results[idx].snippet = unescape(s[1].replace(/<[^>]+>/g, ''));
         idx++;
       }
     }
